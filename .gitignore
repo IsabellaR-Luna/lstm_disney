@@ -5,6 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
+backend/app/models_1
+backend/app/models_sem_prepart
+backend/app/coletor_dados.py
+backend/app/inferencia.py
+backend/app/validacao.py
+backend/app/treinamento.py
 
 # Distribution / packaging
 .Python
