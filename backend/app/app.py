@@ -1,359 +1,349 @@
-# api/main.py
-from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import List, Optional, Dict
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel, validator
+from typing import List, Optional
 from datetime import datetime, timedelta
+from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import pandas as pd
-import yfinance as yf
-from keras.models import load_model
 import pickle
-import json
-import time
-import redis
-import asyncio
-from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
-from fastapi.responses import Response
-import uvicorn
 import logging
+from keras.models import load_model
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Métricas Prometheus
-prediction_counter = Counter('predictions_total', 'Total predictions made')
-prediction_duration = Histogram('prediction_duration_seconds', 'Prediction duration')
-api_requests = Counter('api_requests_total', 'Total API requests', ['endpoint', 'status'])
-model_accuracy = Gauge('model_accuracy_percent', 'Current model accuracy')
-active_connections = Gauge('active_connections', 'Active API connections')
-cache_hits = Counter('cache_hits_total', 'Cache hits')
-cache_misses = Counter('cache_misses_total', 'Cache misses')
-
-# Inicializar FastAPI
-app = FastAPI(
-    title="Disney Stock Prediction API",
-    description="LSTM model for DIS stock price prediction",
-    version="1.0.0"
-)
+app = FastAPI(title="Disney Stock Prediction API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:3000"],  # URL do frontend React
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Permite todos os métodos (GET, POST, etc)
+    allow_headers=["*"],  # Permite todos os headers
 )
 
-# Redis para cache (opcional - fallback se não estiver disponível)
-try:
-    redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
-    redis_client.ping()
-    REDIS_AVAILABLE = True
-except:
-    REDIS_AVAILABLE = False
-    logger.warning("Redis não disponível - operando sem cache")
 
-# Modelos Pydantic
-class PredictionRequest(BaseModel):
-    days: int = Field(default=7, ge=1, le=30, description="Number of days to predict")
-    use_cache: bool = Field(default=True, description="Use cached predictions if available")
-
-class CustomPredictionRequest(BaseModel):
-    historical_prices: List[float] = Field(..., min_items=60, max_items=60)
-    days_ahead: int = Field(default=1, ge=1, le=30)
-
-class PredictionResponse(BaseModel):
-    symbol: str
-    predictions: List[Dict[str, float]]
-    current_price: float
-    confidence: float
-    timestamp: str
-    cache_hit: bool = False
-
-class HealthResponse(BaseModel):
-    status: str
-    model_loaded: bool
-    redis_connected: bool
-    uptime: float
-    total_predictions: int
-
-class MetricsResponse(BaseModel):
-    mae: float
-    rmse: float
-    mape: float
-    r2_score: float
-    last_training: str
-    accuracy_direction: float
-
-# Serviço de Predição
-class PredictionService:
-    def __init__(self):
-        self.modelo = None
-        self.scaler = None
-        self.config = None
-        self.janela = 60
-        self.metricas = {}
-        self.start_time = time.time()
-        self.total_predictions = 0
-        
-    def carregar_modelo(self):
+class OHLCVData(BaseModel):
+    date: str
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    
+    @validator('date')
+    def validate_date(cls, v):
         try:
-            self.modelo = load_model('models/modelo_disney_lstm.h5', compile=False)
-            
-            with open('data/scaler.pkl', 'rb') as f:
-                self.scaler = pickle.load(f)
-            self.validar_scaler()
-            
-            with open('models/config.json', 'r') as f:
-                self.config = json.load(f)
-            
-            with open('models/metricas.json', 'r') as f:
-                self.metricas = json.load(f)
-                model_accuracy.set(100 - self.metricas.get('mape', 0))
-            try:
-                dummy_input = np.zeros((1, self.janela, 1))
-                self.modelo.predict(dummy_input, verbose=0)
-            except Exception as e:
-                raise RuntimeError(f"Modelo incompatível com input (1, 60, 1): {e}")
-            
-            logger.info("Modelo carregado com sucesso")
-            return True
-        except Exception as e:
-            logger.error(f"Erro ao carregar modelo: {e}")
-            return False
-        
-        
-    def validar_scaler(self):
-        if not hasattr(self.scaler, "n_features_in_"):
-            raise RuntimeError("Scaler inválido ou incompatível")
-
-        if self.scaler.n_features_in_ != 1:
-            raise RuntimeError(
-                f"Scaler espera {self.scaler.n_features_in_} features, "
-                "mas o modelo usa 1 (preço)"
-            )
-
-        logger.info("Scaler compatível com o modelo (1 feature)")
-
+            datetime.strptime(v, '%Y-%m-%d')
+            return v
+        except:
+            raise ValueError('Date must be YYYY-MM-DD format')
     
-    @prediction_duration.time()
-    @prediction_duration.time()
-    def prever(self, dias: int = 7, use_cache: bool = True) -> Dict:
-        prediction_counter.inc()
-        self.total_predictions += 1
+    @validator('high')
+    def validate_high_low(cls, v, values):
+        if 'low' in values and v < values['low']:
+            raise ValueError('High must be >= Low')
+        return v
 
-        # -------- Cache --------
-        cache_key = f"disney_prediction:{dias}"
+class NextDayRequest(BaseModel):
+    historical_data: Optional[List[OHLCVData]] = None
 
-        if REDIS_AVAILABLE and use_cache:
-            cached = redis_client.get(cache_key)
-            if cached:
-                cache_hits.inc()
-                result = json.loads(cached)
-                result["cache_hit"] = True
-                return result
-            cache_misses.inc()
-
-        # -------- Validações --------
-        if self.modelo is None or self.scaler is None:
-            raise RuntimeError("Modelo ou scaler não carregado")
-
-        # -------- Download dos dados --------
-        df = yf.download(
-            "DIS",
-            period="3mo",
-            progress=False,
-            auto_adjust=False
-        )
-
-        if df.empty:
-            raise ValueError("Falha ao obter dados do Yahoo Finance")
-
-        if "Adj Close" not in df.columns:
-            raise ValueError(f"Colunas inesperadas: {df.columns.tolist()}")
-
-        if len(df) < self.janela:
-            raise ValueError("Dados insuficientes para previsão")
-
-        precos = df["Adj Close"].values.astype(float)
-        ultimo_preco = float(precos[-1])
-        ultimos_dias = precos[-self.janela:]
-
-        # -------- Normalização --------
-        entrada = self.scaler.transform(ultimos_dias.reshape(-1, 1))
-        entrada = entrada.reshape(1, self.janela, 1)
-
-        previsoes = []
-
-        # -------- Loop de previsão --------
-        for i in range(dias):
-            pred_norm = self.modelo.predict(entrada, verbose=0)
-            pred = float(self.scaler.inverse_transform(pred_norm)[0, 0])
-
-            data_previsao = df.index[-1] + timedelta(days=i + 1)
-
-            if i == 0:
-                variacao = (pred - ultimo_preco) / ultimo_preco * 100
-            else:
-                variacao = (pred - previsoes[-1]["price"]) / previsoes[-1]["price"] * 100
-
-            previsoes.append({
-                "date": data_previsao.strftime("%Y-%m-%d"),
-                "price": pred,
-                "change_percent": variacao
-            })
-
-            # shift da janela
-            entrada = np.vstack([
-                entrada[0, 1:, 0],
-                pred_norm[0]
-            ]).reshape(1, self.janela, 1)
-
-        # -------- Confiança --------
-        confianca = self._calcular_confianca()
-
-        resultado = {
-            "symbol": "DIS",
-            "predictions": previsoes,
-            "current_price": ultimo_preco,
-            "confidence": confianca,
-            "timestamp": datetime.now().isoformat(),
-            "cache_hit": False
-        }
-
-        if REDIS_AVAILABLE:
-            redis_client.setex(cache_key, 3600, json.dumps(resultado))
-
-        return resultado
-
+class MultiDayRequest(BaseModel):
+    days: int
+    historical_data: Optional[List[OHLCVData]] = None
     
-    
-    
-    
-    def prever_custom(self, precos: List[float], dias: int) -> List[float]:
-        if len(precos) != self.janela:
-            raise ValueError(f"Necessário exatamente {self.janela} preços históricos")
-        
-        precos_array = np.array(precos)
-        entrada = self.scaler.transform(precos_array.reshape(-1, 1))
-        entrada = entrada.reshape(1, self.janela, 1)
-        
-        previsoes = []
-        for _ in range(dias):
-            pred_norm = self.modelo.predict(entrada, verbose=0)
-            pred = self.scaler.inverse_transform(pred_norm)[0, 0]
-            previsoes.append(float(pred))
-            
-            nova_entrada = np.append(entrada[0, 1:], pred_norm.reshape(1, 1), axis=0)
-            entrada = nova_entrada.reshape(1, self.janela, 1)
-        
-        return previsoes
-    
-    def _calcular_confianca(self) -> float:
-        mape = self.metricas.get('mape', 10)
-        confianca = max(0, min(95, 100 - mape))
-        return float(confianca)
+    @validator('days')
+    def validate_days(cls, v):
+        if v < 1 or v > 30:
+            raise ValueError('Days must be between 1 and 30')
+        return v
 
-# Instanciar serviço
-prediction_service = PredictionService()
+class InvestmentRequest(BaseModel):
+    capital: Optional[float] = None
+    horizon: str = "medium"
+    risk_profile: str = "moderate"
+    
+    @validator('horizon')
+    def validate_horizon(cls, v):
+        if v not in ['short', 'medium', 'long']:
+            raise ValueError('Horizon must be short, medium, or long')
+        return v
+    
+    @validator('risk_profile')
+    def validate_risk(cls, v):
+        if v not in ['conservative', 'moderate', 'aggressive']:
+            raise ValueError('Risk must be conservative, moderate, or aggressive')
+        return v
 
-# Endpoints
-@app.on_event("startup")
-async def startup_event():
-    active_connections.set(0)
-    if not prediction_service.carregar_modelo():
-        logger.error("Falha ao carregar modelo na inicialização")
+class ModelLoader:
+    _instance = None
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance.model = load_model('models/modelo_disney_lstm.h5', compile=False)  # ✅ Nome correto
+            with open('data/dados_lstm.pkl', 'rb') as f:
+                cls._instance.data = pickle.load(f)
+            cls._instance.scaler = cls._instance.data['simples']['scaler']
+            logger.info(f"Model loaded - scaler has {cls._instance.scaler.n_features_in_} feature(s)")
+        return cls._instance
 
-@app.get("/", tags=["Root"])
-def root():
-    return {
-        "message": "Disney Stock Prediction API",
-        "version": "1.0.0",
-        "docs": "/docs"
-    }
+def validate_ohlcv_data(data: List[OHLCVData]):
+    if len(data) < 60:
+        raise HTTPException(400, f"Need at least 60 days of data, got {len(data)}")
+    
+    dates = [datetime.strptime(d.date, '%Y-%m-%d') for d in data]
+    if dates != sorted(dates):
+        raise HTTPException(400, "Dates must be in chronological order")
+    
+    logger.info(f"Validated {len(data)} days of OHLCV data")
+    return data
 
-@app.get("/health", response_model=HealthResponse, tags=["Health"])
+def prepare_data_for_prediction(data: List[OHLCVData], scaler):
+    """✅ CORRIGIDO: Usar apenas Close"""
+    df = pd.DataFrame([d.dict() for d in data])
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # ✅ Usar apenas Close (1 feature)
+    close_data = df['close'].values.reshape(-1, 1)
+    scaled_data = scaler.transform(close_data)
+    
+    # ✅ Pegar últimos 60 dias e reshape para (1, 60, 1)
+    X = scaled_data[-60:].reshape(1, 60, 1)
+    return X
+
+def inverse_transform_price(pred_price, scaler):
+    """✅ Inverter normalização do preço previsto"""
+    return float(scaler.inverse_transform(pred_price.reshape(-1, 1))[0, 0])
+
+def calculate_trend(current_price, predicted_price):
+    """✅ NOVO: Calcular tendência baseado na diferença de preço"""
+    diff_percent = ((predicted_price - current_price) / current_price) * 100
+    
+    if diff_percent > 1.0:
+        return "Alta", min(abs(diff_percent) * 20, 100)
+    elif diff_percent < -1.0:
+        return "Baixa", min(abs(diff_percent) * 20, 100)
+    else:
+        return "Neutro", 100 - abs(diff_percent) * 10
+
+@app.get("/health")
 def health_check():
-    api_requests.labels(endpoint='health', status='success').inc()
-    
-    return HealthResponse(
-        status="healthy" if prediction_service.modelo else "unhealthy",
-        model_loaded=prediction_service.modelo is not None,
-        redis_connected=REDIS_AVAILABLE,
-        uptime=time.time() - prediction_service.start_time,
-        total_predictions=prediction_service.total_predictions
-    )
-
-@app.post("/predict", response_model=PredictionResponse, tags=["Prediction"])
-async def predict(request: PredictionRequest):
-    active_connections.inc()
-    
     try:
-        if not prediction_service.modelo:
-            api_requests.labels(endpoint='predict', status='error').inc()
-            raise HTTPException(status_code=503, detail="Model not loaded")
-        
-        resultado = prediction_service.prever(request.days, request.use_cache)
-        
-        api_requests.labels(endpoint='predict', status='success').inc()
-        return PredictionResponse(**resultado)
-        
-    except Exception as e:
-        api_requests.labels(endpoint='predict', status='error').inc()
-        raise HTTPException(status_code=500, detail=str(e))
-    
-    finally:
-        active_connections.dec()
-
-@app.post("/predict-custom", tags=["Prediction"])
-async def predict_custom(request: CustomPredictionRequest):
-    try:
-        if not prediction_service.modelo:
-            raise HTTPException(status_code=503, detail="Model not loaded")
-        
-        previsoes = prediction_service.prever_custom(
-            request.historical_prices,
-            request.days_ahead
-        )
+        loader = ModelLoader()
+        model_loaded = loader.model is not None
+        data_loaded = loader.data is not None
         
         return {
-            "predictions": previsoes,
-            "days_predicted": request.days_ahead,
+            "status": "healthy" if model_loaded and data_loaded else "unhealthy",
+            "model_loaded": model_loaded,
+            "data_loaded": data_loaded,
+            "scaler_features": loader.scaler.n_features_in_,
             "timestamp": datetime.now().isoformat()
         }
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Health check failed: {str(e)}")
+        return {
+            "status": "unhealthy",
+            "model_loaded": False,
+            "data_loaded": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
 
-@app.get("/metrics", response_model=MetricsResponse, tags=["Metrics"])
-def get_metrics():
-    api_requests.labels(endpoint='metrics', status='success').inc()
-    
-    return MetricsResponse(
-        mae=prediction_service.metricas.get('mae', 0),
-        rmse=prediction_service.metricas.get('rmse', 0),
-        mape=prediction_service.metricas.get('mape', 0),
-        r2_score=0.85,
-        last_training=prediction_service.config.get('training_date', 'Unknown'),
-        accuracy_direction=prediction_service.metricas.get('direction_accuracy', 0)
-    )
-
-@app.get("/metrics/prometheus", tags=["Monitoring"])
-def prometheus_metrics():
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
-
-@app.get("/latest-prediction", tags=["Prediction"])
-def get_latest_prediction():
+@app.post("/api/predict/next-day")
+def predict_next_day(request: NextDayRequest):
     try:
-        with open('models/ultimas_previsoes.json', 'r') as f:
-            return json.load(f)
-    except:
-        raise HTTPException(status_code=404, detail="No predictions available")
+        loader = ModelLoader()
+        
+        if request.historical_data:
+            validate_ohlcv_data(request.historical_data)
+            X = prepare_data_for_prediction(request.historical_data, loader.scaler)
+            current_price = request.historical_data[-1].close
+        else:
+            X = loader.data['simples']['X_test'][-1:, :, :]
+            # ✅ Pegar último preço real do teste
+            current_price = float(loader.scaler.inverse_transform(
+                loader.data['simples']['y_test'][-1].reshape(-1, 1)
+            )[0, 0])
+        
+        # ✅ Modelo retorna apenas preço
+        pred_price = loader.model.predict(X, verbose=0)
+        price = inverse_transform_price(pred_price, loader.scaler)
+        
+        # ✅ Calcular tendência manualmente
+        trend, confidence = calculate_trend(current_price, price)
+        
+        recommendation = "MANTER"
+        if trend == "Alta" and confidence > 65:
+            recommendation = "COMPRAR"
+        elif trend == "Baixa" and confidence > 65:
+            recommendation = "VENDER"
+        
+        logger.info(f"Next day prediction: ${price:.2f}, {trend}, {recommendation}")
+        
+        return {
+            "success": True,
+            "data": {
+                "predicted_price": round(price, 2),
+                "current_price": round(current_price, 2),
+                "trend": trend,
+                "confidence": round(confidence, 1),
+                "recommendation": recommendation
+            },
+            "metadata": {"timestamp": datetime.now().isoformat(), "model_version": "1.0"}
+        }
+    except Exception as e:
+        logger.error(f"Prediction error: {str(e)}")
+        raise HTTPException(500, str(e))
 
-if __name__ == "__main__":
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+@app.post("/api/predict/multi-day")
+def predict_multi_day(request: MultiDayRequest):
+    try:
+        loader = ModelLoader()
+        
+        if request.historical_data:
+            validate_ohlcv_data(request.historical_data)
+            X = prepare_data_for_prediction(request.historical_data, loader.scaler)
+            last_prices = [d.close for d in request.historical_data[-60:]]
+        else:
+            X = loader.data['simples']['X_test'][-1:, :, :]
+            # ✅ Pegar últimos 60 preços reais
+            last_60 = loader.data['simples']['X_test'][-1, :, 0]
+            last_prices = loader.scaler.inverse_transform(last_60.reshape(-1, 1)).flatten().tolist()
+        
+        predictions = []
+        current_sequence = X.copy()
+        
+        for i in range(request.days):
+            # ✅ Prever próximo preço
+            pred_price = loader.model.predict(current_sequence, verbose=0)
+            price = inverse_transform_price(pred_price, loader.scaler)
+            
+            # ✅ Calcular tendência
+            current_price = last_prices[-1]
+            trend, _ = calculate_trend(current_price, price)
+            
+            predictions.append({
+                "day": i + 1,
+                "date": (datetime.now() + timedelta(days=i+1)).strftime('%Y-%m-%d'),
+                "predicted_price": round(price, 2),
+                "trend": trend
+            })
+            
+            # ✅ Atualizar sequência para próxima previsão
+            pred_scaled = loader.scaler.transform([[price]])[0, 0]
+            current_sequence = np.roll(current_sequence, -1, axis=1)
+            current_sequence[0, -1, 0] = pred_scaled
+            last_prices.append(price)
+        
+        logger.info(f"Multi-day prediction for {request.days} days completed")
+        
+        return {
+            "success": True,
+            "data": {"predictions": predictions},
+            "metadata": {"timestamp": datetime.now().isoformat(), "model_version": "1.0"}
+        }
+    except Exception as e:
+        logger.error(f"Multi-day prediction error: {str(e)}")
+        raise HTTPException(500, str(e))
+
+@app.get("/api/model/metrics")
+def get_model_metrics():
+    try:
+        with open('models/metricas.json', 'r') as f:  # ✅ Nome correto
+            import json
+            metrics = json.load(f)
+        
+        logger.info("Model metrics retrieved")
+        
+        return {
+            "success": True,
+            "data": {
+                "mae": round(metrics['mae'], 2),
+                "rmse": round(metrics['rmse'], 2),
+                "mape": round(metrics['mape'], 2),
+                "direction_accuracy": round(metrics['direction_accuracy'], 1)
+            },
+            "metadata": {"timestamp": datetime.now().isoformat(), "model_version": "1.0"}
+        }
+    except Exception as e:
+        logger.error(f"Metrics error: {str(e)}")
+        raise HTTPException(500, str(e))
+
+@app.get("/api/data/historical")
+def get_historical_data(start_date: str, end_date: str):
+    try:
+        start = datetime.strptime(start_date, '%Y-%m-%d')
+        end = datetime.strptime(end_date, '%Y-%m-%d')
+        
+        if start >= end:
+            raise HTTPException(400, "Start date must be before end date")
+        
+        df = pd.read_csv('data/dados_processados.csv')
+        df['Date'] = pd.to_datetime(df['Date'])
+        
+        mask = (df['Date'] >= start) & (df['Date'] <= end)
+        filtered = df[mask][['Date', 'Open', 'High', 'Low', 'Close', 'Volume']].to_dict('records')
+        
+        logger.info(f"Historical data from {start_date} to {end_date}: {len(filtered)} records")
+        
+        return {
+            "success": True,
+            "data": {"historical": filtered},
+            "metadata": {"timestamp": datetime.now().isoformat(), "records": len(filtered)}
+        }
+    except ValueError:
+        raise HTTPException(400, "Invalid date format, use YYYY-MM-DD")
+    except Exception as e:
+        logger.error(f"Historical data error: {str(e)}")
+        raise HTTPException(500, str(e))
+
+@app.post("/api/analyze/investment")
+def analyze_investment(request: InvestmentRequest):
+    try:
+        loader = ModelLoader()
+        X = loader.data['simples']['X_test'][-1:, :, :]
+        
+        # ✅ Pegar preço atual
+        current_price = float(loader.scaler.inverse_transform(
+            loader.data['simples']['y_test'][-1].reshape(-1, 1)
+        )[0, 0])
+        
+        # ✅ Prever preço
+        pred_price = loader.model.predict(X, verbose=0)
+        price = inverse_transform_price(pred_price, loader.scaler)
+        
+        # ✅ Calcular tendência
+        trend, confidence = calculate_trend(current_price, price)
+        
+        risk_multiplier = {'conservative': 0.7, 'moderate': 1.0, 'aggressive': 1.3}[request.risk_profile]
+        adjusted_confidence = confidence * risk_multiplier
+        
+        if adjusted_confidence > 65 and trend == 'Alta':
+            recommendation = "COMPRAR"
+        elif adjusted_confidence > 65 and trend == 'Baixa':
+            recommendation = "VENDER"
+        else:
+            recommendation = "MANTER"
+        
+        score = min(100, adjusted_confidence)
+        
+        logger.info(f"Investment analysis: {recommendation}, score: {score:.1f}")
+        
+        return {
+            "success": True,
+            "data": {
+                "recommendation": recommendation,
+                "confidence_score": round(score, 1),
+                "predicted_price": round(price, 2),
+                "current_price": round(current_price, 2),
+                "trend": trend,
+                "risk_profile": request.risk_profile,
+                "horizon": request.horizon
+            },
+            "metadata": {"timestamp": datetime.now().isoformat(), "model_version": "1.0"}
+        }
+    except Exception as e:
+        logger.error(f"Investment analysis error: {str(e)}")
+        raise HTTPException(500, str(e))
