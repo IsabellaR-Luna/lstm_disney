@@ -8,6 +8,7 @@ import pandas as pd
 import pickle
 import logging
 from keras.models import load_model
+import json
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -18,9 +19,14 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],  # URL do frontend React
     allow_credentials=True,
-    allow_methods=["*"],  # Permite todos os métodos (GET, POST, etc)
-    allow_headers=["*"],  # Permite todos os headers
+    allow_methods=["*"],  
+    allow_headers=["*"],  
 )
+
+MODEL_PATH = '/app/app/models/modelo_disney_lstm.h5'
+DATA_PATH = '/app/app/data/dados_lstm.pkl'
+METRICS_PATH = '/app/app/models/metricas.json'
+HISTORICAL_DATA_PATH = '/app/app/data/dados_processados.csv'
 
 
 class OHLCVData(BaseModel):
@@ -81,9 +87,13 @@ class ModelLoader:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance.model = load_model('models/modelo_disney_lstm.h5', compile=False)  # ✅ Nome correto
-            with open('data/dados_lstm.pkl', 'rb') as f:
+            cls._instance.model = load_model(MODEL_PATH, compile=False)
+            logger.info(f'Model Loaded from {MODEL_PATH}')
+
+            with open(DATA_PATH, 'rb') as f:
                 cls._instance.data = pickle.load(f)
+            logger.info(f'Data Loaded from {DATA_PATH}')
+
             cls._instance.scaler = cls._instance.data['simples']['scaler']
             logger.info(f"Model loaded - scaler has {cls._instance.scaler.n_features_in_} feature(s)")
         return cls._instance
@@ -100,24 +110,24 @@ def validate_ohlcv_data(data: List[OHLCVData]):
     return data
 
 def prepare_data_for_prediction(data: List[OHLCVData], scaler):
-    """✅ CORRIGIDO: Usar apenas Close"""
+    """CORRIGIDO: Usar apenas Close"""
     df = pd.DataFrame([d.dict() for d in data])
     df['date'] = pd.to_datetime(df['date'])
     
-    # ✅ Usar apenas Close (1 feature)
+    # Usar apenas Close (1 feature)
     close_data = df['close'].values.reshape(-1, 1)
     scaled_data = scaler.transform(close_data)
     
-    # ✅ Pegar últimos 60 dias e reshape para (1, 60, 1)
+    # Pegar últimos 60 dias e reshape para (1, 60, 1)
     X = scaled_data[-60:].reshape(1, 60, 1)
     return X
 
 def inverse_transform_price(pred_price, scaler):
-    """✅ Inverter normalização do preço previsto"""
+    """Inverter normalização do preço previsto"""
     return float(scaler.inverse_transform(pred_price.reshape(-1, 1))[0, 0])
 
 def calculate_trend(current_price, predicted_price):
-    """✅ NOVO: Calcular tendência baseado na diferença de preço"""
+    """NOVO: Calcular tendência baseado na diferença de preço"""
     diff_percent = ((predicted_price - current_price) / current_price) * 100
     
     if diff_percent > 1.0:
@@ -162,16 +172,16 @@ def predict_next_day(request: NextDayRequest):
             current_price = request.historical_data[-1].close
         else:
             X = loader.data['simples']['X_test'][-1:, :, :]
-            # ✅ Pegar último preço real do teste
+            # Pegar último preço real do teste
             current_price = float(loader.scaler.inverse_transform(
                 loader.data['simples']['y_test'][-1].reshape(-1, 1)
             )[0, 0])
         
-        # ✅ Modelo retorna apenas preço
+        # Modelo retorna apenas preço
         pred_price = loader.model.predict(X, verbose=0)
         price = inverse_transform_price(pred_price, loader.scaler)
         
-        # ✅ Calcular tendência manualmente
+        # Calcular tendência manualmente
         trend, confidence = calculate_trend(current_price, price)
         
         recommendation = "MANTER"
@@ -208,7 +218,7 @@ def predict_multi_day(request: MultiDayRequest):
             last_prices = [d.close for d in request.historical_data[-60:]]
         else:
             X = loader.data['simples']['X_test'][-1:, :, :]
-            # ✅ Pegar últimos 60 preços reais
+            # Pegar últimos 60 preços reais
             last_60 = loader.data['simples']['X_test'][-1, :, 0]
             last_prices = loader.scaler.inverse_transform(last_60.reshape(-1, 1)).flatten().tolist()
         
@@ -216,11 +226,11 @@ def predict_multi_day(request: MultiDayRequest):
         current_sequence = X.copy()
         
         for i in range(request.days):
-            # ✅ Prever próximo preço
+            # Prever próximo preço
             pred_price = loader.model.predict(current_sequence, verbose=0)
             price = inverse_transform_price(pred_price, loader.scaler)
             
-            # ✅ Calcular tendência
+            # Calcular tendência
             current_price = last_prices[-1]
             trend, _ = calculate_trend(current_price, price)
             
@@ -231,7 +241,7 @@ def predict_multi_day(request: MultiDayRequest):
                 "trend": trend
             })
             
-            # ✅ Atualizar sequência para próxima previsão
+            # Atualizar sequência para próxima previsão
             pred_scaled = loader.scaler.transform([[price]])[0, 0]
             current_sequence = np.roll(current_sequence, -1, axis=1)
             current_sequence[0, -1, 0] = pred_scaled
@@ -251,8 +261,8 @@ def predict_multi_day(request: MultiDayRequest):
 @app.get("/api/model/metrics")
 def get_model_metrics():
     try:
-        with open('models/metricas.json', 'r') as f:  # ✅ Nome correto
-            import json
+        with open(METRICS_PATH, 'r') as f:  # Nome correto
+            
             metrics = json.load(f)
         
         logger.info("Model metrics retrieved")
@@ -280,7 +290,7 @@ def get_historical_data(start_date: str, end_date: str):
         if start >= end:
             raise HTTPException(400, "Start date must be before end date")
         
-        df = pd.read_csv('data/dados_processados.csv')
+        df = pd.read_csv(HISTORICAL_DATA_PATH)
         df['Date'] = pd.to_datetime(df['Date'])
         
         mask = (df['Date'] >= start) & (df['Date'] <= end)
@@ -305,16 +315,16 @@ def analyze_investment(request: InvestmentRequest):
         loader = ModelLoader()
         X = loader.data['simples']['X_test'][-1:, :, :]
         
-        # ✅ Pegar preço atual
+        # Pegar preço atual
         current_price = float(loader.scaler.inverse_transform(
             loader.data['simples']['y_test'][-1].reshape(-1, 1)
         )[0, 0])
         
-        # ✅ Prever preço
+        # Prever preço
         pred_price = loader.model.predict(X, verbose=0)
         price = inverse_transform_price(pred_price, loader.scaler)
         
-        # ✅ Calcular tendência
+        # Calcular tendência
         trend, confidence = calculate_trend(current_price, price)
         
         risk_multiplier = {'conservative': 0.7, 'moderate': 1.0, 'aggressive': 1.3}[request.risk_profile]

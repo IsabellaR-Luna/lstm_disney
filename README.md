@@ -2,7 +2,7 @@
 
 Sistema completo de predição de preços de ações da Disney (DIS) utilizando Deep Learning (LSTM) com FastAPI backend e React frontend.
 
-Link da apresentação do Projeto : 
+Link da apresentação do Projeto : https://youtu.be/6Kfsbu9FzQ4
 
 ## 🚀 Sobre o Projeto
 
@@ -36,7 +36,14 @@ Este projeto foi desenvolvido para fins educacionais e de pesquisa, demonstrando
 - **Lucide React** - Ícones modernos
 - **CSS3** - Estilização responsiva
 
+### Infraestrutura
+- **Docker** - Containerização
+- **Docker Compose** - Orquestração de containers
+
+
 ---
+
+
 
 ## 📁 Estrutura do Repositório
 ```
@@ -58,10 +65,10 @@ disney-stock-predictor/
 │   │   ├── app.py                     # API FastAPI
 │   │   └── model.py                   # Script de treinamento
 │   │
+│   ├── Dockerfile                     # Container do backend
 │   └── requirements.txt               # Dependências Python
 │
 ├── frontend/
-│   ├── node_modules/                  # Dependências Node
 │   ├── public/                        # Arquivos públicos
 │   ├── src/
 │   │   ├── App.js                     # Componente principal React
@@ -69,9 +76,12 @@ disney-stock-predictor/
 │   │   ├── index.js                   # Entry point
 │   │   └── index.css                  # Estilos globais
 │   │
+│   ├── Dockerfile                     # Container do frontend
+│   ├── nginx.conf                     # Configuração Nginx
 │   ├── package.json                   # Dependências e scripts
 │   └── package-lock.json
 │
+├── docker-compose.yml                 # Orquestração dos containers
 └── README.md                          # Este arquivo
 ```
 
@@ -79,24 +89,99 @@ disney-stock-predictor/
 
 ## ✅ Pré-requisitos
 
-### Backend
-- Python 3.8 ou superior
-- pip (gerenciador de pacotes Python)
+- Docker Desktop instalado
+- Docker Compose instalado
 
-### Frontend
-- Node.js 14 ou superior
-- npm (gerenciador de pacotes Node)
+### Início Rápido
+
+```bash
+# 1. Clone o repositório
+git clone 
+cd listm_disney
+
+# 2. Subir os containers
+docker-compose up --build
+```
+---
+
+### URLs de Acesso
+
+| Serviço | URL | Descrição |
+|---------|-----|-----------|
+| **Frontend** | http://localhost:3000 | Interface do usuário |
+| **API** | http://localhost:8000 | Backend FastAPI |
+| **Docs API** | http://localhost:8000/docs | Documentação Swagger |
+| **Health Check** | http://localhost:8000/health | Status da API |
+
+### Comandos Docker Úteis
+
+```bash
+# Subir containers em background
+docker-compose up -d
+
+# Ver logs em tempo real
+docker-compose logs -f
+
+# Ver logs de um serviço específico
+docker-compose logs -f disney-api
+docker-compose logs -f disney-frontend
+
+# Parar containers
+docker-compose down
+
+# Rebuild completo (após mudanças)
+docker-compose down
+docker-compose build --no-cache
+docker-compose up
+
+# Ver status dos containers
+docker-compose ps
+
+# Acessar terminal do container
+docker exec -it disney-api bash
+docker exec -it disney-frontend sh
+```
+
+### Estrutura dos Containers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Docker Network                        │
+│                                                          │
+│  ┌──────────────────┐      ┌──────────────────────────┐ │
+│  │  disney-frontend │      │      disney-api          │ │
+│  │                  │      │                          │ │
+│  │  Nginx + React   │─────▶│  FastAPI + LSTM Model    │ │
+│  │  Port: 3000      │      │  Port: 8000              │ │
+│  │                  │      │                          │ │
+│  └──────────────────┘      └──────────────────────────┘ │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Mapeamento de Volumes e Portas
+
+| Container | Porta Interna | Porta Externa |
+|-----------|---------------|---------------|
+| disney-api | 8000 | 8000 |
+| disney-frontend | 80 | 3000 |
 
 ---
 
-## 📦 Instalação
+## 💻 Executando Localmente (Desenvolvimento)
+
+### Pré-requisitos
+- Python 3.8 ou superior
+- Node.js 14 ou superior
+- pip e npm instalados
 
 ### 1️⃣ Backend (API)
+
 ```bash
 # Navegar para a pasta do backend
-cd backend/app
+cd backend
 
-# Criar ambiente virtual (recomendado)
+# Criar ambiente virtual
 python -m venv venv
 
 # Ativar ambiente virtual
@@ -106,15 +191,17 @@ venv\Scripts\activate
 source venv/bin/activate
 
 # Instalar dependências
-pip install fastapi uvicorn tensorflow scikit-learn pandas numpy yfinance matplotlib pydantic
-
-# OU usar requirements.txt
 pip install -r requirements.txt
+
+# Iniciar servidor
+cd app
+uvicorn app:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### 2️⃣ Treinar o Modelo (primeira vez)
+
 ```bash
-# Ainda na pasta backend/app
+# Na pasta backend/app
 python model.py
 ```
 
@@ -127,39 +214,21 @@ Este comando irá:
 **Tempo estimado:** 5-15 minutos dependendo do hardware
 
 ### 3️⃣ Frontend (Interface)
+
 ```bash
-# Navegar para a pasta do frontend
+# Em outro terminal, navegar para frontend
 cd frontend
 
 # Instalar dependências
 npm install
 
-# Instalar bibliotecas adicionais
-npm install lucide-react recharts
+# Iniciar em modo desenvolvimento
+npm start
 ```
 
 ---
 
-## 🚀 Como Usar
-
-### Iniciar o Backend (API)
-```bash
-# Terminal 1 - Na pasta backend/app
-uvicorn app:app --reload
-```
-
-✅ API disponível em: **http://localhost:8000**  
-✅ Documentação Swagger: **http://localhost:8000/docs**
-
-### Iniciar o Frontend
-```bash
-# Terminal 2 - Na pasta frontend
-npm start
-```
-
-✅ Interface disponível em: **http://localhost:3000**
-
-### Fluxo de Uso
+## 🚀 Fluxo de Uso
 
 1. **Acesse** http://localhost:3000
 2. **Leia** a aba "Início" para entender o sistema
@@ -177,40 +246,60 @@ npm start
 ```http
 GET /health
 ```
-Verifica o status da API e do modelo
+Verifica o status da API e do modelo carregado.
+
+**Resposta:**
+```json
+{
+  "status": "healthy",
+  "model_loaded": true,
+  "data_loaded": true,
+  "scaler_features": 1,
+  "timestamp": "2026-01-10T15:30:00"
+}
+```
 
 ### Próximo Dia
 ```http
 POST /api/predict/next-day
+Content-Type: application/json
+
 Body: {} ou { "historical_data": [...] }
 ```
-Prevê o preço para o próximo dia útil
+Prevê o preço para o próximo dia útil.
 
 ### Múltiplos Dias
 ```http
 POST /api/predict/multi-day
+Content-Type: application/json
+
 Body: { "days": 7 }
 ```
-Prevê preços para 1-30 dias futuros
+Prevê preços para 1-30 dias futuros.
 
 ### Métricas do Modelo
 ```http
 GET /api/model/metrics
 ```
-Retorna MAE, RMSE, MAPE e acurácia
+Retorna MAE, RMSE, MAPE e acurácia direcional.
 
 ### Dados Históricos
 ```http
 GET /api/data/historical?start_date=2024-01-01&end_date=2024-07-20
 ```
-Retorna preços históricos reais
+Retorna preços históricos reais da Disney.
 
 ### Análise de Investimento
 ```http
 POST /api/analyze/investment
-Body: { "risk_profile": "moderate", "horizon": "medium" }
+Content-Type: application/json
+
+Body: { 
+  "risk_profile": "moderate",  // conservative, moderate, aggressive
+  "horizon": "medium"          // short, medium, long
+}
 ```
-Análise personalizada com recomendações
+Análise personalizada com recomendações.
 
 ---
 
@@ -226,6 +315,7 @@ O modelo LSTM foi treinado com dados de **2018 a 2024** e apresenta as seguintes
 | **Acurácia Direcional** | Taxa de acerto da direção | 60-75% |
 
 ### Arquitetura do Modelo
+
 ```
 Input: 60 dias de preços de fechamento
     ↓
@@ -239,23 +329,6 @@ Output: Preço previsto
 ```
 
 **Total de parâmetros:** ~15.000
-
----
-
-## ⚠️ Aviso Legal
-
-**IMPORTANTE:** Este sistema é destinado **exclusivamente para fins educacionais e de pesquisa**.
----
-
-
-## 🐛 Problemas Conhecidos
-
-
-### Dependências
-Se houver erros de importação, reinstale:
-```bash
-pip install --upgrade tensorflow keras scikit-learn
-```
 
 ---
 

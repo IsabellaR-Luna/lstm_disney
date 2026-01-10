@@ -24,12 +24,12 @@ EPOCHS = 100
 BATCH_SIZE = 32
 
 # ==================== COLETA DE DADOS ====================
-print("📊 Baixando dados da Disney...")
+
 df = yf.download(SYMBOL, start=START_DATE, end=END_DATE, progress=False)
-print(f"✅ {len(df)} dias coletados")
+print(f"{len(df)} dias coletados")
 
 # ==================== PREPARAÇÃO DOS DADOS ====================
-print("\n🔧 Preparando dados...")
+print("Preparando dados...")
 
 # Usar apenas Close
 close_prices = df['Close'].values.reshape(-1, 1)
@@ -64,7 +64,7 @@ datas_test = datas[n_val:]
 print(f"Treino: {len(X_train)} | Validação: {len(X_val)} | Teste: {len(X_test)}")
 
 # ==================== CRIAR MODELO ====================
-print("\n🤖 Criando modelo LSTM...")
+print("Criando modelo LSTM...")
 
 model = Sequential([
     LSTM(50, return_sequences=True, input_shape=(WINDOW_SIZE, 1)),
@@ -79,7 +79,7 @@ model.compile(optimizer=Adam(learning_rate=0.001), loss='mse', metrics=['mae'])
 print(f"Parâmetros: {model.count_params()}")
 
 # ==================== TREINAR MODELO ====================
-print("\n🚀 Treinando modelo...")
+print("Treinando modelo...")
 
 callbacks = [
     EarlyStopping(monitor='val_loss', patience=15, restore_best_weights=True, verbose=1),
@@ -96,7 +96,7 @@ history = model.fit(
 )
 
 # ==================== AVALIAR MODELO ====================
-print("\n📊 Avaliando modelo...")
+print("Avaliando modelo...")
 
 y_pred = model.predict(X_test, verbose=0)
 
@@ -127,7 +127,7 @@ print(f"MAPE: {mape:.2f}%")
 print(f"Acurácia Direção: {direction_accuracy:.1f}%")
 
 # ==================== VISUALIZAÇÕES ====================
-print("\n📈 Criando visualizações...")
+print("visualizações...")
 
 fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
@@ -174,10 +174,10 @@ ax.grid(True, alpha=0.3)
 
 plt.tight_layout()
 plt.savefig('models/resultados_modelo.png', dpi=100)
-print("✅ Gráfico salvo: models/resultados_modelo.png")
+print("Salvo: models/resultados_modelo.png")
 
 # ==================== SALVAR MODELO E DADOS ====================
-print("\n💾 Salvando modelo e dados...")
+print("Salvando modelo e dados...")
 
 import os
 os.makedirs('models', exist_ok=True)
@@ -234,15 +234,3 @@ df_processed = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
 df_processed.reset_index(inplace=True)
 df_processed.columns = ['Date', 'Open', 'High', 'Low', 'Close', 'Volume']
 df_processed.to_csv('data/dados_processados.csv', index=False)
-
-print("\n✅ TREINAMENTO CONCLUÍDO!")
-print(f"📁 Arquivos salvos:")
-print(f"   • models/modelo_disney_lstm.h5")
-print(f"   • models/metricas.json")
-print(f"   • models/config.json")
-print(f"   • models/historico_treino.csv")
-print(f"   • models/resultados_modelo.png")
-print(f"   • data/dados_lstm.pkl")
-print(f"   • data/dados_processados.csv")
-print(f"\n🎯 Scaler: {scaler.n_features_in_} feature(s)")
-print(f"🎯 Modelo: input_shape = ({WINDOW_SIZE}, 1)")
